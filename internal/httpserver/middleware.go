@@ -3,17 +3,20 @@
 package httpserver
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"uuid"
 
 	"github.com/bootdotdev/learn-web-security/internal/httpx"
 	"github.com/bootdotdev/learn-web-security/internal/logging"
@@ -29,7 +32,44 @@ func applyMiddleware(handler http.Handler, middlewareChain ...middleware) http.H
 	return handler
 }
 
-func permissiveCORS(next http.Handler) http.Handler {
+type requestIDContextKey struct{}
+
+func requestIDMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(
+		responseWriter http.ResponseWriter,
+		request *http.Request,
+	) {
+		requestID := uuid.NewV4()
+
+		responseWriter.Header().Set(
+			"X-Request-ID",
+			requestID.String(),
+		)
+
+		ctx := context.WithValue(
+			request.Context(),
+			requestIDContextKey{},
+			requestID,
+		)
+
+		next.ServeHTTP(responseWriter, request.WithContext(ctx))
+	})
+}
+
+func publicProductsCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		next.ServeHTTP(w, r)
+	})
+}
+
+func handleProductsOptions(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+/*func permissiveCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
 		if origin := request.Header.Get("Origin"); origin != "" {
 			responseWriter.Header().Set("Access-Control-Allow-Origin", origin)
@@ -44,6 +84,63 @@ func permissiveCORS(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(responseWriter, request)
 	})
+}*/
+
+func validateRequestSource(appOrigin string, renderer *templates.Renderer) middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+			// Non-POST requests are allowed.
+			if request.Method != http.MethodPost {
+				next.ServeHTTP(responseWriter, request)
+				return
+			}
+
+			trusted := false
+
+			originValues := request.Header.Values("Origin")
+
+			if len(originValues) > 0 {
+				// If Origin exists, it must match exactly.
+				trusted = len(originValues) == 1 && originValues[0] == appOrigin
+			} else {
+				// Only fall back to Referer when Origin is absent.
+				refererValues := request.Header.Values("Referer")
+
+				if len(refererValues) == 1 {
+					refererURL, err := url.Parse(refererValues[0])
+
+					if err == nil &&
+						refererURL.IsAbs() &&
+						refererURL.Host != "" &&
+						refererURL.User == nil &&
+						(refererURL.Scheme == "http" || refererURL.Scheme == "https") {
+
+						refererOrigin := refererURL.Scheme + "://" + refererURL.Host
+						trusted = refererOrigin == appOrigin
+					}
+				}
+			}
+
+			if !trusted {
+				if err := httpx.RespondWithErrorPage(
+					responseWriter,
+					renderer,
+					http.StatusForbidden,
+					"Forbidden",
+					"Your request source could not be verified.",
+				); err != nil {
+					http.Error(
+						responseWriter,
+						http.StatusText(http.StatusInternalServerError),
+						http.StatusInternalServerError,
+					)
+				}
+				return
+			}
+
+			next.ServeHTTP(responseWriter, request)
+		})
+	}
 }
 
 func cspNonce(next http.Handler) http.Handler {
@@ -56,6 +153,57 @@ func cspNonce(next http.Handler) http.Handler {
 		nonce := base64.StdEncoding.EncodeToString(nonceBytes)
 		request = request.WithContext(httpx.WithCSPNonce(request.Context(), nonce))
 		next.ServeHTTP(responseWriter, request)
+	})
+}
+
+/*func contentSecurityPolicy(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		nonce := httpx.CSPNonce(request.Context())
+
+		responseWriter.Header().Set(
+			"Content-Security-Policy",
+			"default-src 'self'; script-src 'self' 'nonce-"+nonce+"'; style-src 'self'; img-src 'self' data:; frame-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'",
+		)
+
+		responseWriter.Header().Set(
+			"X-Frame-Options",
+			"SAMEORIGIN",
+		)
+
+		responseWriter.Header().Set(
+			"Referrer-Policy",
+			"strict-origin-when-cross-origin",
+		)
+
+		next.ServeHTTP(responseWriter, request)
+	})
+}*/
+
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nonce := httpx.CSPNonce(r.Context())
+
+		// Content Security Policy
+		w.Header().Set(
+			"Content-Security-Policy",
+			"default-src 'self'; script-src 'self' 'nonce-"+nonce+"'; style-src 'self'; img-src 'self' data:; frame-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'",
+		)
+
+		// Existing security headers
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+
+		// Additional security headers
+		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		w.Header().Set("Origin-Agent-Cluster", "?1")
+		w.Header().Set("X-DNS-Prefetch-Control", "off")
+		w.Header().Set("X-Download-Options", "noopen")
+		w.Header().Set("X-Permitted-Cross-Domain-Policies", "none")
+		w.Header().Set("X-XSS-Protection", "0")
+
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -79,16 +227,82 @@ func recoverPanics(logger *logging.Logger, renderer *templates.Renderer) middlew
 	}
 }
 
-func LoadShedder(_ int, _ int) func(http.Handler) http.Handler {
+func LoadShedder(maxConcurrent int, retryAfterSeconds int) func(http.Handler) http.Handler {
+	// Validate configuration before allocating channel
+	if maxConcurrent <= 0 {
+		panic("max concurrent requests must be positive")
+	}
+
+	if retryAfterSeconds <= 0 {
+		panic("retry after seconds must be positive")
+	}
+
+	// Shared buffered channel to track in-flight requests
+	inFlight := make(chan struct{}, maxConcurrent)
+
 	return func(next http.Handler) http.Handler {
-		return next
+		return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+
+			// Set limit header on every response
+			responseWriter.Header().Set(
+				"X-In-Flight-Limit",
+				fmt.Sprintf("%d", maxConcurrent),
+			)
+
+			// Try to acquire capacity without blocking
+			select {
+			case inFlight <- struct{}{}:
+
+				// Release capacity even if handler panics
+				defer func() {
+					<-inFlight
+				}()
+
+				// Process request
+				next.ServeHTTP(responseWriter, request)
+
+			default:
+				// Server is at capacity
+				responseWriter.Header().Set(
+					"Retry-After",
+					fmt.Sprintf("%d", retryAfterSeconds),
+				)
+
+				httpx.RespondWithJSON(
+					responseWriter,
+					http.StatusServiceUnavailable,
+					map[string]string{
+						"error": "Service is at capacity",
+					},
+				)
+			}
+		})
 	}
 }
 
-func SearchThrottle(_ *templates.Renderer) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return next
-	}
+func SearchThrottle(renderer *templates.Renderer) func(http.Handler) http.Handler {
+	return fixedWindowRateLimiter(rateLimitOptions{
+		window:  time.Second,
+		maximum: 5,
+		key: func(_ *http.Request) string {
+			return "search"
+		},
+		onLimit: func(w http.ResponseWriter, _ *http.Request, _ rateLimitState) {
+			if err := httpx.RespondWithErrorPage(
+				w,
+				renderer,
+				http.StatusTooManyRequests,
+				"Search Is Busy",
+				"Try again shortly.",
+			); err != nil {
+				http.Error(
+					w,
+					http.StatusText(http.StatusInternalServerError),
+					http.StatusInternalServerError,
+				)
+			}
+		},
+	})
 }
 
 type rateLimitCounter struct {
@@ -197,9 +411,20 @@ func (limiter *fixedWindowLimiter) reject(responseWriter http.ResponseWriter, re
 }
 
 func fixedWindowRateLimiter(options rateLimitOptions) middleware {
-	validateRateLimitOptions(options)
+	limiter := newFixedWindowLimiter(options)
+
 	return func(next http.Handler) http.Handler {
-		return next
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			state, limited := limiter.consume(r)
+
+			if limited {
+				limiter.reject(w, r, state)
+				return
+			}
+
+			setRateLimitHeaders(w, state)
+			next.ServeHTTP(w, r)
+		})
 	}
 }
 
@@ -240,4 +465,19 @@ func boolToInt64(value bool) int64 {
 		return 1
 	}
 	return 0
+}
+
+func middlewareNoSniff(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func allowCrossOriginResourcePolicy(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cross-Origin-Resource-Policy", "cross-origin")
+		next.ServeHTTP(w, r)
+	})
 }

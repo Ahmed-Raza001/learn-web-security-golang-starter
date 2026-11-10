@@ -225,6 +225,24 @@ func (handler *authHandler) RecoverMFA(responseWriter http.ResponseWriter, reque
 		}
 		return
 	}
+
+	if passwords.NeedsRehash(user.PasswordHash) {
+		newHash, err := passwords.Hash(password)
+		if err != nil {
+			handler.internalError(responseWriter, request, err)
+			return
+		}
+
+		if err := handler.accounts.UpdatePasswordHash(
+			request.Context(),
+			user.ID,
+			newHash,
+		); err != nil {
+			handler.internalError(responseWriter, request, err)
+			return
+		}
+	}
+
 	consumed, err := handler.mfa.ConsumeBackupCode(request.Context(), user.ID, backupCode)
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
@@ -287,11 +305,17 @@ func (handler *authHandler) RequestPasswordReset(responseWriter http.ResponseWri
 	}
 	if !found {
 		handler.logAuthenticationEvent(request, "password_reset_request", map[string]any{
-			"email":         email,
-			"success":       false,
-			"failureReason": "email not found",
+			"email":   email,
+			"success": false,
 		})
-		if err := handler.renderPasswordResetRequest(responseWriter, http.StatusNotFound, false, "No account exists for that email.", ""); err != nil {
+
+		if err := handler.renderPasswordResetRequest(
+			responseWriter,
+			http.StatusOK,
+			true,
+			"",
+			"",
+		); err != nil {
 			handler.internalError(responseWriter, request, err)
 		}
 		return
@@ -313,7 +337,13 @@ func (handler *authHandler) RequestPasswordReset(responseWriter http.ResponseWri
 		"resetToken": resetToken.Value,
 		"resetLink":  resetLink,
 	})
-	if err := handler.renderPasswordResetRequest(responseWriter, http.StatusOK, true, "", "/password-reset/"+resetToken.Value); err != nil {
+	if err := handler.renderPasswordResetRequest(
+		responseWriter,
+		http.StatusOK,
+		true,
+		"",
+		"",
+	); err != nil {
 		handler.internalError(responseWriter, request, err)
 	}
 }
@@ -338,7 +368,8 @@ func (handler *authHandler) PasswordResetPage(responseWriter http.ResponseWriter
 
 func (handler *authHandler) ResetPassword(responseWriter http.ResponseWriter, request *http.Request) {
 	token := request.PathValue("token")
-	resetToken, found, err := handler.passwordResets.Validate(request.Context(), token)
+	//resetToken, found, err := handler.passwordResets.Validate(request.Context(), token)
+	_, found, err := handler.passwordResets.Validate(request.Context(), token)
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
 		return
@@ -349,8 +380,7 @@ func (handler *authHandler) ResetPassword(responseWriter http.ResponseWriter, re
 		}
 		return
 	}
-	user, userFound, err := handler.accounts.FindUserByID(request.Context(), resetToken.UserID)
-	if err != nil {
+	/*if err != nil {
 		handler.internalError(responseWriter, request, err)
 		return
 	}
@@ -359,7 +389,7 @@ func (handler *authHandler) ResetPassword(responseWriter http.ResponseWriter, re
 			handler.internalError(responseWriter, request, err)
 		}
 		return
-	}
+	}*/
 	password, err := httpx.FormValue(request, "password")
 	if err != nil {
 		handler.invalidForm(responseWriter)
@@ -383,18 +413,27 @@ func (handler *authHandler) ResetPassword(responseWriter http.ResponseWriter, re
 		handler.internalError(responseWriter, request, err)
 		return
 	}
-	reset, err := handler.passwordResets.ResetPassword(request.Context(), token, passwordHash)
+	_, err = handler.passwordResets.ResetPassword(request.Context(), token, passwordHash)
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
 		return
 	}
-	if !reset {
-		if err := handler.renderPasswordReset(responseWriter, http.StatusNotFound, token, "Reset link not found or expired", ""); err != nil {
-			handler.internalError(responseWriter, request, err)
-		}
-		return
+	if err := handler.renderPasswordReset(
+		responseWriter,
+		http.StatusOK,
+		token,
+		"",
+		"Password reset successful",
+	); err != nil {
+		handler.internalError(responseWriter, request, err)
 	}
-	if err := handler.renderPasswordReset(responseWriter, http.StatusOK, "", "", user.Email); err != nil {
+	if err := handler.renderPasswordResetRequest(
+		responseWriter,
+		http.StatusOK,
+		true,
+		"",
+		"",
+	); err != nil {
 		handler.internalError(responseWriter, request, err)
 	}
 }

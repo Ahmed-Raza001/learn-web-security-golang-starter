@@ -3,7 +3,8 @@ package checkout
 import (
 	"errors"
 	"net/http"
-	"strconv"
+	//"strconv"
+	"context"
 	"strings"
 	"time"
 
@@ -83,6 +84,11 @@ func (handler *Handler) Submit(responseWriter http.ResponseWriter, request *http
 	if !ok {
 		return
 	}
+	submittedToken, err := httpx.FormValue(request, "csrfToken")
+	if err != nil || !sessions.CSRFTokensMatch(current.Session.CSRFToken, submittedToken) {
+		http.Error(responseWriter, "Forbidden", http.StatusForbidden)
+		return
+	}
 	items, err := handler.cartStore.ListItems(request.Context(), current.User.ID)
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
@@ -96,7 +102,7 @@ func (handler *Handler) Submit(responseWriter http.ResponseWriter, request *http
 		handler.renderCheckoutError(responseWriter, request, http.StatusConflict, current, items, unavailableItem.Name+" is no longer available in the requested quantity. Update your cart before checking out.")
 		return
 	}
-	shippingDetails, discountCents, valid := handler.parseCheckoutForm(responseWriter, request)
+	shippingDetails, valid := handler.parseCheckoutForm(responseWriter, request)
 	if !valid {
 		return
 	}
@@ -104,13 +110,26 @@ func (handler *Handler) Submit(responseWriter http.ResponseWriter, request *http
 		handler.renderCheckoutError(responseWriter, request, http.StatusBadRequest, current, items, "All shipping fields are required")
 		return
 	}
-	_, err = acorn.Reserve(request.Context(), acorn.Request{
+	_, err = acorn.ReserveWithTimeout(request.Context(), acorn.Request{
 		Name:       shippingDetails.Name,
 		Address:    shippingDetails.Address,
 		City:       shippingDetails.City,
 		Region:     shippingDetails.Region,
 		PostalCode: shippingDetails.PostalCode,
 	}, handler.fulfillmentDelay)
+	if errors.Is(err, context.DeadlineExceeded) {
+		responseWriter.Header().Set("Retry-After", "1")
+		handler.renderCheckoutError(
+			responseWriter,
+			request,
+			http.StatusServiceUnavailable,
+			current,
+			items,
+			"Shipping is temporarily unavailable. Try again shortly.",
+		)
+		return
+	}
+
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
 		return
@@ -128,7 +147,7 @@ func (handler *Handler) Submit(responseWriter http.ResponseWriter, request *http
 		handler.renderCheckoutError(responseWriter, request, http.StatusConflict, current, items, unavailableItem.Name+" is no longer available in the requested quantity. Update your cart before checking out.")
 		return
 	}
-	order, err := handler.orderStore.CreateFromCart(request.Context(), current.User.ID, items, discountCents, shippingDetails, checkoutAdminNotes, handler.keyring)
+	order, err := handler.orderStore.CreateFromCart(request.Context(), current.User.ID, items, shippingDetails, checkoutAdminNotes, handler.keyring)
 	if errors.Is(err, orders.ErrInsufficientInventory) {
 		currentItems, listErr := handler.cartStore.ListItems(request.Context(), current.User.ID)
 		if listErr != nil {
@@ -187,24 +206,26 @@ func (handler *Handler) Processing(responseWriter http.ResponseWriter, request *
 	}
 }
 
-func (handler *Handler) parseCheckoutForm(responseWriter http.ResponseWriter, request *http.Request) (orders.ShippingDetails, int64, bool) {
+func (handler *Handler) parseCheckoutForm(responseWriter http.ResponseWriter, request *http.Request) (orders.ShippingDetails, bool) {
 	fieldNames := []string{"shippingName", "shippingAddress", "shippingCity", "shippingRegion", "shippingPostalCode"}
 	fieldValues := make(map[string]string, len(fieldNames))
+
 	for _, fieldName := range fieldNames {
 		fieldValue, err := httpx.FormValue(request, fieldName)
 		if err != nil {
 			handler.errorPage(responseWriter, http.StatusBadRequest, "Invalid Request", "The submitted form is invalid.")
-			return orders.ShippingDetails{}, 0, false
+			return orders.ShippingDetails{}, false
 		}
 		fieldValues[fieldName] = fieldValue
 	}
+
 	return orders.ShippingDetails{
 		Name:       strings.TrimSpace(fieldValues["shippingName"]),
 		Address:    strings.TrimSpace(fieldValues["shippingAddress"]),
 		City:       strings.TrimSpace(fieldValues["shippingCity"]),
 		Region:     strings.TrimSpace(fieldValues["shippingRegion"]),
 		PostalCode: strings.TrimSpace(fieldValues["shippingPostalCode"]),
-	}, parseDiscount(request.PostForm.Get("discountCents")), true
+	}, true
 }
 
 func (handler *Handler) renderPage(responseWriter http.ResponseWriter, statusCode int, current accounts.CurrentSession, items []cart.Item, errorMessage string) error {
@@ -257,7 +278,7 @@ func firstUnavailable(items []cart.Item) *cart.Item {
 	return nil
 }
 
-func parseDiscount(value string) int64 {
+/*func parseDiscount(value string) int64 {
 	discount, _ := strconv.ParseInt(value, 10, 64)
 	return discount
-}
+}*/

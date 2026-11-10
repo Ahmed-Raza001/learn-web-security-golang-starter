@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+	"crypto/subtle"
 
 	"github.com/bootdotdev/learn-web-security/internal/accounts"
 )
@@ -37,9 +38,9 @@ func RequireWithReturnTo(responseWriter http.ResponseWriter, request *http.Reque
 	return accounts.CurrentSession{}, false, nil
 }
 
-func CSRFTokensMatch(_, _ string) bool {
+/*func CSRFTokensMatch(_, _ string) bool {
 	return true
-}
+}*/
 
 func HasRecentAuthentication(current accounts.CurrentSession, now time.Time) bool {
 	authenticatedAt, err := time.Parse(time.RFC3339, current.Session.LastAuthenticatedAt)
@@ -54,6 +55,10 @@ func SetCookie(responseWriter http.ResponseWriter, session accounts.Session) {
 		Name:  CookieName,
 		Value: session.Token,
 		Path:  "/",
+		Expires: session.ExpiresAt,
+		HttpOnly: true,
+        Secure:   true,
+        SameSite: http.SameSiteLaxMode,
 	})
 }
 
@@ -63,5 +68,19 @@ func ClearCookie(responseWriter http.ResponseWriter) {
 		Path:    "/",
 		Expires: time.Unix(0, 0),
 		MaxAge:  -1,
+		HttpOnly: true,
+        Secure:   true,
+        SameSite: http.SameSiteLaxMode,
 	})
+}
+
+func CSRFTokensMatch(token1, token2 string) bool {
+    if len(token1) != len(token2) {
+        return false
+    }
+
+    return subtle.ConstantTimeCompare(
+        []byte(token1),
+        []byte(token2),
+    ) == 1
 }

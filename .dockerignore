@@ -1,0 +1,25 @@
+# Environment files
+.env*
+
+# Git directory
+.git/
+
+# Temporary files
+tmp/
+*.tmp
+*.temp
+
+# Log files
+*.log
+
+# Local databases
+*.sqlite*
+*.db
+
+# Bulk import documents
+data/bulk-tax-documents/
+
+# Runtime uploads
+data/uploads/*
+
+# Keep the required PDF available to Docker

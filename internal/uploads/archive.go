@@ -5,12 +5,11 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"github.com/google/uuid"
 	"io"
-	"mime"
 	"os"
 	"path/filepath"
 	"strings"
-	"uuid"
 )
 
 const (
@@ -63,13 +62,34 @@ func ExtractTaxDocumentArchive(encryptionKeyring Keyring, contents []byte, extra
 		uncompressedBytes += entry.UncompressedSize64
 	}
 
-	identifier := uuid.NewV4()
+	identifier := uuid.New()
 	importDirectory := filepath.Join(extractionDirectory, identifier.String())
 	plannedEntries := make([]plannedArchiveEntry, 0, len(archiveReader.File))
 	for _, entry := range archiveReader.File {
 		entryDestination := filepath.Join(importDirectory, entry.Name)
+
 		if isIgnoredArchiveEntry(entry.Name) {
 			continue
+		}
+
+		// Reject absolute paths
+		if filepath.IsAbs(entry.Name) {
+			return ExtractedTaxDocumentArchive{}, errors.New("archive entry has an absolute path")
+		}
+
+		// Reject Windows-style paths
+		if strings.Contains(entry.Name, `\`) {
+			return ExtractedTaxDocumentArchive{}, errors.New("archive entry contains a backslash")
+		}
+
+		// Reject paths outside the import directory
+		if !isInsideDirectory(importDirectory, entryDestination) {
+			return ExtractedTaxDocumentArchive{}, errors.New("archive entry escapes the import directory")
+		}
+
+		// Reject symbolic links
+		if entry.Mode()&os.ModeSymlink != 0 {
+			return ExtractedTaxDocumentArchive{}, errors.New("archive entry is a symbolic link")
 		}
 		if strings.HasSuffix(entry.Name, "/") {
 			plannedEntries = append(plannedEntries, plannedArchiveEntry{directory: true, destination: entryDestination})
@@ -79,15 +99,18 @@ func ExtractTaxDocumentArchive(encryptionKeyring Keyring, contents []byte, extra
 		if err != nil {
 			return ExtractedTaxDocumentArchive{}, &ArchiveImportError{Message: "Choose a valid ZIP archive.", StatusCode: 400}
 		}
-		contentType := mime.TypeByExtension(filepath.Ext(entry.Name))
-		if contentType == "" {
-			contentType = "application/octet-stream"
+		contentType, extension, valid := detectDocumentType(entryContents)
+		if !valid {
+			return ExtractedTaxDocumentArchive{}, &ArchiveImportError{
+				Message:    "Archive contains an unsupported document type.",
+				StatusCode: 400,
+			}
 		}
 		storedContents, encrypted, err := encryptDocument(entryContents, encryptionKeyring)
 		if err != nil {
 			return ExtractedTaxDocumentArchive{}, err
 		}
-		storagePath := entryDestination
+		storagePath := strings.TrimSuffix(entryDestination, filepath.Ext(entryDestination)) + extension
 		if encrypted {
 			storagePath += ".enc"
 		}
@@ -186,4 +209,17 @@ func discardArchiveAfterWriteFailure(archive ExtractedTaxDocumentArchive, err er
 		return ExtractedTaxDocumentArchive{}, errors.Join(err, discardErr)
 	}
 	return ExtractedTaxDocumentArchive{}, err
+}
+
+func isInsideDirectory(directory, candidatePath string) bool {
+	relativePath, err := filepath.Rel(directory, candidatePath)
+
+	if err != nil ||
+		relativePath == "." ||
+		relativePath == ".." ||
+		strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) {
+		return false
+	}
+
+	return true
 }

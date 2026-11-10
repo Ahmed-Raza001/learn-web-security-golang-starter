@@ -14,5 +14,6 @@ func Safe(value string) string {
 	if _, allowed := allowedPaths[value]; allowed {
 		return value
 	}
+
 	return "/"
 }

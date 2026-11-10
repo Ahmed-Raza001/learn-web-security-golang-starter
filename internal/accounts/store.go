@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/bootdotdev/learn-web-security/internal/database/dbgen"
@@ -20,7 +21,7 @@ const defaultSessionTTL = 30 * 24 * time.Hour
 var ErrEmailExists = errors.New("an account already exists for that email")
 
 func NormalizeEmail(email string) string {
-	return email
+	return strings.ToLower(strings.TrimSpace(email))
 }
 
 type User struct {
@@ -181,6 +182,7 @@ func (store *Store) CurrentSession(ctx context.Context, token string) (CurrentSe
 	if token == "" {
 		return CurrentSession{}, false, nil
 	}
+
 	row, err := store.queries.GetSessionByTokenHash(ctx, HashSessionToken(token))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -188,14 +190,22 @@ func (store *Store) CurrentSession(ctx context.Context, token string) (CurrentSe
 		}
 		return CurrentSession{}, false, fmt.Errorf("find session: %w", err)
 	}
+
 	expiresAt, err := time.Parse(time.RFC3339, row.ExpiresAt)
 	if err != nil || !store.now().Before(expiresAt) {
 		return CurrentSession{}, false, nil
 	}
+
+	// Check whether the session has been revoked.
+	if row.RevokedAt != nil {
+		return CurrentSession{}, false, nil
+	}
+
 	user, found, err := store.FindUserByID(ctx, row.UserID)
 	if err != nil || !found {
 		return CurrentSession{}, false, err
 	}
+
 	return CurrentSession{
 		Session: Session{
 			UserID:              row.UserID,
@@ -209,7 +219,6 @@ func (store *Store) CurrentSession(ctx context.Context, token string) (CurrentSe
 		User: user,
 	}, true, nil
 }
-
 func (store *Store) RevokeSession(ctx context.Context, token string) error {
 	revokedAt := formatTimestamp(store.now().UTC())
 	if err := store.queries.RevokeSession(ctx, dbgen.RevokeSessionParams{
@@ -240,4 +249,13 @@ func HashSessionToken(token string) string {
 
 func formatTimestamp(timestamp time.Time) string {
 	return timestamp.UTC().Format("2006-01-02T15:04:05.000Z")
+}
+
+func (store *Store) RevokeAllActiveSessions(ctx context.Context) (int, error) {
+	count, err := store.queries.RevokeAllActiveSessions(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("revoke all active sessions: %w", err)
+	}
+
+	return int(count), nil
 }

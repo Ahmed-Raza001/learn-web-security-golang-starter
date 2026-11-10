@@ -87,24 +87,28 @@ func (handler *Handler) Upload(responseWriter http.ResponseWriter, request *http
 }
 
 func (handler *Handler) Download(responseWriter http.ResponseWriter, request *http.Request) {
-	_, ok := handler.requireAuth(responseWriter, request)
+	current, ok := handler.requireAuth(responseWriter, request)
 	if !ok {
 		return
 	}
+
 	fileID, valid := httpx.ParseSafeInteger(request.PathValue("id"))
 	if !valid {
 		handler.fileNotFound(responseWriter)
 		return
 	}
+
 	file, found, err := handler.store.FindByID(request.Context(), fileID)
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
 		return
 	}
-	if !found {
+
+	if !found || (file.UserID != current.User.ID && current.User.Role != "support" && current.User.Role != "admin") {
 		handler.fileNotFound(responseWriter)
 		return
 	}
+
 	http.Redirect(responseWriter, request, CreateSignedDownloadPath(handler.downloadSigningKey, file.ID, handler.now()), http.StatusFound)
 }
 
@@ -166,9 +170,15 @@ func (handler *Handler) readUpload(responseWriter http.ResponseWriter, request *
 		return nil, "", err
 	}
 	files := request.MultipartForm.File["document"]
-	if len(files) == 0 {
-		return nil, "", errors.New("missing document upload")
-	}
+
+fileCount := 0
+for _, uploadedFiles := range request.MultipartForm.File {
+    fileCount += len(uploadedFiles)
+}
+
+if fileCount != 1 || len(files) != 1 {
+    return nil, "", errors.New("exactly one document file is required")
+}
 	file, err := files[0].Open()
 	if err != nil {
 		return nil, "", fmt.Errorf("open document upload: %w", err)

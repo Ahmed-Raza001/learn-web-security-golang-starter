@@ -230,9 +230,15 @@ func (handler *Handler) readArchive(responseWriter http.ResponseWriter, request 
 		return nil, fmt.Errorf("parse archive upload: %w", err)
 	}
 	files := request.MultipartForm.File["archive"]
-	if len(files) == 0 {
-		return nil, errors.New("missing archive upload")
-	}
+
+fileCount := 0
+for _, uploadedFiles := range request.MultipartForm.File {
+    fileCount += len(uploadedFiles)
+}
+
+if fileCount != 1 || len(files) != 1 {
+    return nil, errors.New("exactly one archive file is required")
+}
 	file, err := files[0].Open()
 	if err != nil {
 		return nil, fmt.Errorf("open archive upload: %w", err)

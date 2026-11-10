@@ -5,6 +5,7 @@ package uploads
 import (
 	"errors"
 	"fmt"
+	"github.com/google/uuid"
 	"os"
 	"path/filepath"
 )
@@ -20,21 +21,35 @@ type StoredDocument struct {
 }
 
 func StoreDocument(contents []byte, uploadDirectory string, encryptionKeyring Keyring) (StoredDocument, bool, error) {
+	contentType, extension, valid := detectDocumentType(contents)
+	if !valid {
+		return StoredDocument{}, false, nil
+	}
+
 	storedContents, encrypted, err := encryptDocument(contents, encryptionKeyring)
 	if err != nil {
 		return StoredDocument{}, false, err
 	}
+
 	if err := os.MkdirAll(uploadDirectory, 0o755); err != nil {
 		return StoredDocument{}, false, fmt.Errorf("create upload directory: %w", err)
 	}
-	storagePath := filepath.Join(uploadDirectory, "uploaded-document")
+
+	identifier := uuid.New()
+	storagePath := filepath.Join(uploadDirectory, identifier.String()+extension)
+
 	if encrypted {
 		storagePath += ".enc"
 	}
+
 	if err := writeDocument(storagePath, storedContents, encrypted); err != nil {
 		return StoredDocument{}, false, err
 	}
-	return StoredDocument{ContentType: "application/octet-stream", StoragePath: storagePath}, true, nil
+
+	return StoredDocument{
+		ContentType: contentType,
+		StoragePath: storagePath,
+	}, true, nil
 }
 
 func detectDocumentType(contents []byte) (string, string, bool) {
@@ -53,12 +68,30 @@ func detectDocumentType(contents []byte) (string, string, bool) {
 	return "", "", false
 }
 
-func encryptDocument(contents []byte, _ Keyring) (string, bool, error) {
-	return string(contents), false, nil
+func encryptDocument(contents []byte, keyring Keyring) (string, bool, error) {
+    if keyring == nil {
+        return "", false, errors.New("document encryption requires a configured keyring")
+    }
+
+    encryptedContents, err := keyring.Encrypt(contents)
+    if err != nil {
+        return "", false, fmt.Errorf("encrypt document: %w", err)
+    }
+
+    return encryptedContents, true, nil
 }
 
-func decryptDocument(storedContents string, _ Keyring) ([]byte, error) {
-	return []byte(storedContents), nil
+func decryptDocument(storedContents string, keyring Keyring) ([]byte, error) {
+    if keyring == nil {
+        return nil, errors.New("document decryption requires a configured keyring")
+    }
+
+    decryptedContents, err := keyring.Decrypt(storedContents)
+    if err != nil {
+        return nil, fmt.Errorf("decrypt document: %w", err)
+    }
+
+    return decryptedContents, nil
 }
 
 func writeDocument(storagePath, storedContents string, encrypted bool) error {
